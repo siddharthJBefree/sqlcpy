@@ -1,0 +1,124 @@
+// sqlcpy policy file. Copy to `sqlcpy.config.jsonc` (next to your .env), or point CONFIG_FILE in .env at it.
+// Comments are allowed. Unknown keys are ERRORS on purpose: a typo must never silently copy a sensitive table.
+// Table names are case-insensitive and accept * and ? (e.g. "tmp_*"). An exact name beats a pattern.
+{
+  // 1. IGNORE – never listed, compared, copied or dropped. Triggers on an ignored table are ignored too.
+  "ignore": [
+    "tmp_*",
+    "*_bak",
+    "*_old",
+    "timesheet_portal",
+    "directory_entity_copy",
+    "directory_entity_file_copy",
+    "hr_detail_o",
+    "hr_detail_not_work"
+  ],
+  "sensitive": {
+    // 2a. WHOLE TABLE – the structure is copied, but not one row is ever read from the master:
+    //     no rows in the slave, none in dumps/, none on this machine.
+    "tables": [],
+    // 2b. SINGLE COLUMNS – the replacement is computed by the master inside the SELECT,
+    //     so the original value never travels to this machine. Replaced columns are skipped
+    //     when deciding whether the table is "in sync".
+    //       "null"  -> NULL                       (column must be nullable)
+    //       "empty" -> '' for text, 0 for numbers
+    //       "hash"  -> salted SHA-256 hex, cut to the column length (min 16). Same input => same output,
+    //                  so UNIQUE keys and joins keep working. Needs MASK_SALT in .env.
+    //       "random" -> pseudo-random text or a number from 0 to 9 (may collide with UNIQUE indexes)
+    //       { "value": "..." } -> a custom fixed value (type-checked)
+    //       { "from": "other_column" } -> value from a compatible, unmasked non-key column
+    //       { "concat": [{ "column": "first_name" }, "@123", { "column": "last_name" }] }
+    //                  -> join text columns and static text (not raw SQL).
+    //                     Optional "maxLength": N trims the result to N characters.
+    // Primary-key and range columns cannot be masked – use "tables" for those.
+    "columns": {
+      "user": {
+        "password": {
+          "concat": [
+            {
+              "column": "user_fname"
+            },
+            "@123"
+          ],
+          "maxLength": 100
+        }
+      }
+    }
+  },
+  // 3. RANGE – for huge tables, copy only the latest rows. The slave table then holds just that range.
+  //    "column" must be a date / datetime / timestamp column and should be indexed on the master
+  //    (otherwise sqlcpy refuses, so it can't stall a production server; see "allowUnindexed" below).
+  //    Give exactly one of:
+  //       "last":  "12h" | "7d" | "2w" | "1m" (month) | "1y"      rolling, measured on the master's clock
+  //       "since": "2026-01-01" | "2026-01-01 08:00:00"            fixed start
+  //    A table is "in sync" when every master row inside the range is on the slave, unchanged.
+  //
+  //    "allowUnindexed" (optional, default false) – override for the "range column must be indexed" check.
+  //       Why the check exists: rows are read in chunks ordered by (column, primary key). With no index
+  //       starting at "column", the master has to scan and sort the WHOLE table for every chunk, which
+  //       can stall a production server on a big table. By default sqlcpy refuses such a range instead:
+  //       the table shows "error" and nothing is copied.
+  //       Preferred fix – add the index on the master (a composite index that starts with the column also counts):
+  //           CREATE INDEX idx_table_name_date ON table_name (date);
+  //       Set "allowUnindexed": true only when you accept the full scans, e.g. the table is small,
+  //       you run off-hours or against a replica, or you cannot change the schema. It applies to that one
+  //       table only and must be the literal true (a string such as "true" counts as false).
+  //       Example: "table_name": { "column": "date", "last": "1m", "allowUnindexed": true }
+  "range": {
+    "timesheet": {
+      "column": "date",
+      "last": "1m"
+    },
+    "user_audit": {
+      "column": "modified_on",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "hr_user_in_out_time": {
+      "column": "date",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "directory_audiovideo": {
+      "column": "created_on",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "directory_entity": {
+      "column": "created_on",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "directory_entity_file": {
+      "column": "created_on",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "worksheet_task_checklist": {
+      "column": "created_on",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "audits": {
+      "column": "created_at",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "hr_detail":{
+      "column": "created_on",
+      "last": "1m",
+      "allowUnindexed": true
+    },
+    "worksheet_taskchecklist_email_for_client": {
+      "column": "created_on",
+      "last": "1m",
+      "allowUnindexed": true
+    }
+  },
+  "schedule": {
+    "cron": "15 * * * *",
+    "timezone": "Asia/Kolkata",
+    "skipIfUnchanged": false,
+    "atomicSwap": false
+  }
+}

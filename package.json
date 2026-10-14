@@ -1,0 +1,39 @@
+{
+  "name": "sqlcpy",
+  "version": "0.1.0",
+  "description": "Interactive terminal tool to copy MySQL tables, views, routines and triggers from a master DB to a slave DB in safe chunks",
+  "main": "src/index.js",
+  "bin": {
+    "sqlcpy": "bin/sqlcpy.js"
+  },
+  "scripts": {
+    "start": "node bin/sqlcpy.js",
+    "daemon": "node bin/sqlcpy.js daemon",
+    "run-once": "node bin/sqlcpy.js run-once",
+    "build:linux-x64": "pkg bin/sqlcpy.js --targets node22-linux-x64 --public --no-bytecode --output dist/sqlcpy-linux-x64",
+    "build:windows-x64": "pkg bin/sqlcpy.js --targets node22-win-x64 --public --no-bytecode --output dist/sqlcpy-win-x64.exe",
+    "build:macos-x64": "pkg bin/sqlcpy.js --targets node22-macos-x64 --public --no-bytecode --output dist/sqlcpy-macos-x64",
+    "build:macos-arm64": "pkg bin/sqlcpy.js --targets node22-macos-arm64 --public --no-bytecode --output dist/sqlcpy-macos-arm64",
+    "build:macos": "npm run build:macos-x64 && npm run build:macos-arm64"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT",
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE.md",
+    "sqlcpy.config.example.jsonc"
+  ],
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "mysql2": "^3.11.0",
+    "node-cron": "^3.0.3",
+    "sqlstring": "^2.3.3"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.23.0"
+  }
+}
