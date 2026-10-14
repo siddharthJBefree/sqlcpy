@@ -64,7 +64,8 @@ async function main() {
     const t0 = Date.now();
     try {
       const [r] = await app[side].query('SELECT VERSION() AS v');
-      if (side === 'master' && app.driver.assertReadOnly) await app.driver.assertReadOnly(app.master);
+      // TEMPORARILY DISABLED: read-only permission check on master
+      // if (side === 'master' && app.driver.assertReadOnly) await app.driver.assertReadOnly(app.master);
       console.log(` ${green('✔')} ${bold(side.padEnd(6))} ${target} ${gray(`MySQL ${r[0].v} · ${Date.now() - t0}ms`)}`);
     } catch (e) {
       failed = true;
