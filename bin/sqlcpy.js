@@ -76,6 +76,7 @@ async function main() {
         for (const line of [
           `CREATE USER 'backup_user'@'%' IDENTIFIED BY 'change_me';`,
           `GRANT SELECT, SHOW VIEW, TRIGGER, EXECUTE ON \`${database}\`.* TO 'backup_user'@'%';`,
+          `GRANT SHOW_ROUTINE ON *.* TO 'backup_user'@'%';`,
           'FLUSH PRIVILEGES;',
         ]) console.log(`       ${cyan(line)}`);
         console.log('');

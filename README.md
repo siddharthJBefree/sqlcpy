@@ -139,6 +139,8 @@ master user holds anything beyond `SELECT`, `SHOW VIEW`, `TRIGGER`, `EXECUTE` (a
 ```sql
 CREATE USER 'backup_user'@'%' IDENTIFIED BY 'change_me';
 GRANT SELECT, SHOW VIEW, TRIGGER, EXECUTE ON your_database.* TO 'backup_user'@'%';
+-- required to read stored procedure / function bodies (MySQL 8.0.20+, global-only privilege)
+GRANT SHOW_ROUTINE ON *.* TO 'backup_user'@'%';
 FLUSH PRIVILEGES;
 ```
 

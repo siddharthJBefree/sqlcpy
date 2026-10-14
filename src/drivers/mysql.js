@@ -90,7 +90,12 @@ async function getCreateSql(pool, kind, name) {
   }[kind];
   const [rows] = await pool.query(`SHOW CREATE ${spec[0]} ${quote(name)}`);
   const sql = rows[0] && rows[0][spec[1]];
-  if (!sql) throw new Error(`No definition returned for ${kind} ${name} (insufficient privileges?)`);
+  if (!sql) {
+    const hint = kind === 'procedures' || kind === 'functions'
+      ? ' - MySQL hides routine bodies unless the user is the definer or holds global SHOW_ROUTINE (8.0.20+) / SELECT: GRANT SHOW_ROUTINE ON *.* TO user'
+      : ' (insufficient privileges?)';
+    throw new Error(`No definition returned for ${kind} ${name}${hint}`);
+  }
   return sql;
 }
 
@@ -275,7 +280,7 @@ async function cutoff(pool, range) {
 }
 
 const READ_ONLY_PRIVS = new Set([
-  'USAGE', 'SELECT', 'SHOW VIEW', 'SHOW DATABASES', 'PROCESS', 'EXECUTE', 'TRIGGER', 'REPLICATION CLIENT',
+  'USAGE', 'SELECT', 'SHOW VIEW', 'SHOW DATABASES', 'PROCESS', 'EXECUTE', 'TRIGGER', 'REPLICATION CLIENT', 'SHOW_ROUTINE',
 ]);
 
 /** Throws if the connected user holds any privilege beyond read access (the master must never be written to). */
