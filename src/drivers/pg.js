@@ -212,8 +212,32 @@ async function listObjects(pool) {
 
 const missing = (kind, name, why = '') => new Error(`No definition returned for ${kind} ${name}${why || ' (does it exist, and may this user read it?)'}`);
 
-/** CREATE statements for one table plus its partitions, indexes and comments, joined by ";\n" (the caller adds the last ";"). */
-async function tableSql(pool, name) {
+/**
+ * ALTER TABLE ... ADD FOREIGN KEY as a statement that never fails: it is skipped (with a warning) when the child or
+ * the referenced table is not on the slave yet, or when the constraint is already there. Added NOT VALID because a
+ * partial copy (range, schema-only or masked table) can legitimately leave child rows without a parent.
+ */
+function guardedForeignKey(child, name, def) {
+  const rel = lit(quote(child));
+  return `DO $sqlcpy$
+BEGIN
+  IF to_regclass(${rel}) IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(${rel}) AND conname = ${lit(name)}) THEN
+    EXECUTE ${lit(`ALTER TABLE ${quote(child)} ADD CONSTRAINT ${quote(name)} ${def.replace(/ NOT VALID$/, '')} NOT VALID`)};
+  END IF;
+EXCEPTION WHEN others THEN
+  RAISE WARNING 'sqlcpy: foreign key % on % skipped: %', ${lit(name)}, ${lit(child)}, SQLERRM;
+END
+$sqlcpy$`;
+}
+
+/**
+ * CREATE statements for one table plus its partitions, indexes and comments, joined by ";\n" (the caller adds the last ";").
+ * forCopy: foreign keys are not part of CREATE TABLE but follow it as guarded ALTERs, so two tables that reference each
+ * other (or a parent that is copied later) can be copied in any order. The keys of other tables that point at this one
+ * are re-added too, since they cannot exist on the slave while this table is missing. The definition used for comparing
+ * keeps the keys inline.
+ */
+async function tableSql(pool, name, forCopy = false) {
   const [rel] = await pool.query(
     `SELECT c.oid, c.relpersistence AS persistence, array_to_string(c.reloptions, ', ') AS options,
             CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END AS partkey,
@@ -255,13 +279,26 @@ async function tableSql(pool, name) {
     `SELECT conname AS name, pg_get_constraintdef(oid) AS def FROM pg_constraint
       WHERE conrelid = $1 AND contype IN ('p', 'u', 'c', 'x', 'f') AND conislocal
       ORDER BY CASE contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'c' THEN 2 WHEN 'x' THEN 3 ELSE 4 END, conname`, [t.oid]);
-  for (const k of cons) lines.push(`CONSTRAINT ${quote(k.name)} ${k.def.replace(/ NOT VALID$/, '')}`); // validity is not part of the definition
+  const deferred = [];
+  for (const k of cons) {
+    if (forCopy && /^FOREIGN KEY/.test(k.def)) deferred.push(guardedForeignKey(name, k.name, k.def));
+    else lines.push(`CONSTRAINT ${quote(k.name)} ${k.def.replace(/ NOT VALID$/, '')}`); // validity is not part of the definition
+  }
 
   const stmts = [
     `CREATE ${t.persistence === 'u' ? 'UNLOGGED ' : ''}TABLE ${quote(name)} (${lines.length ? '\n  ' + lines.join(',\n  ') + '\n' : ''})` +
       `${t.partkey ? ` PARTITION BY ${t.partkey}` : ''}${t.options ? ` WITH (${t.options})` : ''}`,
   ];
   if (t.partkey) await partitionsSql(pool, t.oid, name, stmts);
+  stmts.push(...deferred);
+  if (forCopy) {
+    const [inbound] = await pool.query(
+      `SELECT k.conname AS name, cl.relname AS child, pg_get_constraintdef(k.oid) AS def
+         FROM pg_constraint k JOIN pg_class cl ON cl.oid = k.conrelid JOIN pg_namespace cn ON cn.oid = cl.relnamespace
+        WHERE k.contype = 'f' AND k.confrelid = $1 AND k.conrelid <> k.confrelid AND k.conparentid = 0 AND cn.nspname = $2
+        ORDER BY cl.relname, k.conname`, [t.oid, pool.schema]);
+    for (const k of inbound) stmts.push(guardedForeignKey(k.child, k.name, k.def));
+  }
 
   // Indexes that do not back a constraint (those are part of the constraint), minus the schema qualifier pg prints.
   const [idx] = await pool.query(
@@ -320,8 +357,8 @@ async function triggerSql(pool, name) {
   return r[0].def;
 }
 
-async function getCreateSql(pool, kind, name) {
-  if (kind === 'tables') return tableSql(pool, name);
+async function getCreateSql(pool, kind, name, forCopy = false) {
+  if (kind === 'tables') return tableSql(pool, name, forCopy);
   if (kind === 'views') return viewSql(pool, name);
   if (kind === 'triggers') return triggerSql(pool, name);
   return routineSql(pool, kind, name);
@@ -556,7 +593,10 @@ BEGIN
   IF to_regclass('pg_temp.sqlcpy_fk') IS NOT NULL THEN
     FOR r IN SELECT * FROM pg_temp.sqlcpy_fk WHERE parent = ${lit(table)} LOOP
       BEGIN
-        EXECUTE format('ALTER TABLE %I.%I ADD CONSTRAINT %I %s NOT VALID', r.child_schema, r.child, r.name, r.def);
+        -- the copy's own DDL may have re-added it already
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', r.child_schema, r.child)) AND conname = r.name) THEN
+          EXECUTE format('ALTER TABLE %I.%I ADD CONSTRAINT %I %s NOT VALID', r.child_schema, r.child, r.name, r.def);
+        END IF;
       EXCEPTION WHEN others THEN
         RAISE WARNING 'sqlcpy: could not restore foreign key % on % : %', r.name, r.child, SQLERRM;
       END;

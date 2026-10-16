@@ -153,7 +153,7 @@ async function copyTable(ctx, item, onProgress, signal) {
   try {
     swap = Boolean(ctx.swap && driver.supportsSwap !== false && item.slave && scope.mode !== 'schema' && !(await driver.hasForeignKeys(slave, cfg.slave.database, name)));
     onProgress({ phase: 'schema', rowsDone: 0, rowsTotal: 0, bytesDone: 0, chunk: 0, chunks: 0, started });
-    const ddl = driver.normalizeSql(await driver.getCreateSql(master, 'tables', name), cfg.master.database);
+    const ddl = driver.normalizeSql(await driver.getCreateSql(master, 'tables', name, true), cfg.master.database);
     const drop = driver.dropSql('tables', name);
     const note = describeScope(scope);
     await dump.write(`-- sqlcpy dump of ${cfg.master.database}.${name} @ ${new Date().toISOString()}\n` +

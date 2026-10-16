@@ -313,3 +313,38 @@ test('postgres: read-only guard', { skip }, async () => {
     await admin(null, 'DROP ROLE IF EXISTS sqlcpy_ro');
   }
 });
+
+test('postgres: tables that reference each other copy in any order', { skip }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlcpy-pg-'));
+  await freshDatabases();
+  await admin(MASTER, `
+CREATE TABLE department (id int PRIMARY KEY, name text, head_id int);
+CREATE TABLE "user" (id int PRIMARY KEY, name text, department_id int REFERENCES department(id));
+ALTER TABLE department ADD CONSTRAINT department_head_fk FOREIGN KEY (head_id) REFERENCES "user"(id);
+INSERT INTO department VALUES (1, 'eng', NULL);
+INSERT INTO "user" VALUES (1, 'ann', 1);
+UPDATE department SET head_id = 1;`);
+
+  const app = new SqlCpy(config(dir));
+  app.headless = true;
+  t.after(async () => {
+    await app.close();
+    await dropDatabases();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await app.scan({ force: true });
+
+  const fks = () => admin(SLAVE, `SELECT conrelid::regclass::text AS tbl, conname FROM pg_constraint WHERE contype = 'f' ORDER BY 1, 2`);
+
+  await app.copy(byName(app, 'tables', 'department')); // its parent "user" is not on the slave yet
+  assert.deepEqual((await fks()).rows, []);
+  await app.copy(byName(app, 'tables', 'user')); // brings back both its own key and department's key to it
+  assert.deepEqual((await fks()).rows.map((r) => r.conname).sort(), ['department_head_fk', 'user_department_id_fkey']);
+
+  await app.copy(byName(app, 'tables', 'department')); // and re-copying either side keeps them
+  await app.copy(byName(app, 'tables', 'user'));
+  assert.equal((await fks()).rows.length, 2);
+
+  await app.scan({ force: true });
+  assert.deepEqual(Object.entries(statusOf(app)).filter(([, s]) => s !== 'same'), []);
+});
