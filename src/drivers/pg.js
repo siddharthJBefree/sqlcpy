@@ -19,7 +19,7 @@ const { createMaskProblem } = require('./maskcheck');
  *    GRANT SET) is used during loads, and dropping a table temporarily detaches the foreign keys that point at it.
  */
 
-const KINDS = ['tables', 'views', 'procedures', 'functions', 'triggers'];
+const KINDS = ['types', 'sequences', 'tables', 'views', 'procedures', 'functions', 'triggers'];
 const MIN_VERSION = 120000;
 
 const quote = (id) => '"' + String(id).replace(/"/g, '""') + '"';
@@ -160,7 +160,23 @@ async function verify(pool) {
 
 async function listObjects(pool) {
   await verify(pool);
-  const out = { tables: [], views: [], procedures: [], functions: [], triggers: [] };
+  const out = { types: [], sequences: [], tables: [], views: [], procedures: [], functions: [], triggers: [] };
+
+  // Enums, domains, ranges and standalone composites. Array / multirange types and the row type of a table are implicit.
+  const [ty] = await pool.query(
+    `SELECT t.typname AS name FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+      WHERE n.nspname = $1 AND ${NOT_EXTENSION('pg_type', 't')}
+        AND (t.typtype IN ('e', 'd', 'r') OR (t.typtype = 'c' AND EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind = 'c')))
+      ORDER BY 1`, [pool.schema]);
+  for (const x of ty) out.types.push({ name: x.name });
+
+  // Sequences that belong to a serial / identity column are re-created with their table; only free-standing ones are items.
+  const [sq] = await pool.query(
+    `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relkind = 'S' AND ${NOT_EXTENSION('pg_class', 'c')}
+        AND NOT EXISTS (SELECT 1 FROM pg_depend o WHERE o.classid = 'pg_class'::regclass AND o.objid = c.oid AND o.deptype IN ('a', 'i'))
+      ORDER BY 1`, [pool.schema]);
+  for (const x of sq) out.sequences.push({ name: x.name });
 
   // Partitions are listed through their parent (whose definition includes them); extension-owned objects are not ours.
   const [t] = await pool.query(
@@ -195,6 +211,7 @@ async function listObjects(pool) {
     `SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS name, p.prokind AS kind
        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') AND ${NOT_EXTENSION('pg_proc', 'p')}
+        AND NOT EXISTS (SELECT 1 FROM pg_depend o WHERE o.classid = 'pg_proc'::regclass AND o.objid = p.oid AND o.deptype = 'i') -- a range type's constructors come with the type
       ORDER BY 1`, [pool.schema]);
   for (const x of f) (x.kind === 'p' ? out.procedures : out.functions).push({ name: x.name });
 
@@ -357,7 +374,103 @@ async function triggerSql(pool, name) {
   return r[0].def;
 }
 
+const COLLATION_OF = (col, base) => `CASE WHEN ${col} <> 0 AND ${col} <> ${base} THEN
+  (SELECT quote_ident(cn.nspname) || '.' || quote_ident(co.collname) FROM pg_collation co JOIN pg_namespace cn ON cn.oid = co.collnamespace WHERE co.oid = ${col}) END`;
+
+/**
+ * CREATE statement for an enum, domain, composite or range type.
+ * forCopy (enums only): a block that creates the type, or adds the labels the slave lacks to an existing one. An enum
+ * in use cannot be dropped, so this is how a new label reaches a slave whose tables already use the type.
+ */
+async function typeSql(pool, name, forCopy = false) {
+  const [r] = await pool.query(
+    `SELECT t.oid, t.typtype AS kind, t.typrelid AS relid, format_type(t.typbasetype, t.typtypmod) AS base, t.typnotnull AS notnull,
+            pg_get_expr(t.typdefaultbin, 0) AS def, ${COLLATION_OF('t.typcollation', 'COALESCE(bt.typcollation, 0)')} AS collation
+       FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace LEFT JOIN pg_type bt ON bt.oid = t.typbasetype
+      WHERE n.nspname = $1 AND t.typname = $2 AND t.typtype IN ('e', 'd', 'c', 'r')`, [pool.schema, name]);
+  if (!r.length) throw missing('types', name);
+  const t = r[0];
+
+  if (t.kind === 'e') {
+    const [labels] = await pool.query('SELECT enumlabel AS l FROM pg_enum WHERE enumtypid = $1 ORDER BY enumsortorder', [t.oid]);
+    const list = labels.map((x) => x.l);
+    const create = `CREATE TYPE ${quote(name)} AS ENUM (${list.map(lit).join(', ')})`;
+    if (!forCopy) return create;
+    const present = (l) => `EXISTS (SELECT 1 FROM pg_enum WHERE enumtypid = to_regtype(${lit(quote(name))}) AND enumlabel = ${lit(l)})`;
+    const adds = list.map((l, i) => {
+      const where = i > 0 ? `AFTER ${lit(list[i - 1])}` : list.length > 1 ? `BEFORE ${lit(list[1])}` : '';
+      return `    IF NOT ${present(l)} THEN EXECUTE ${lit(`ALTER TYPE ${quote(name)} ADD VALUE ${lit(l)} ${where}`.trim())}; END IF;`;
+    });
+    return `DO $sqlcpy$
+BEGIN
+  IF to_regtype(${lit(quote(name))}) IS NULL THEN
+    EXECUTE ${lit(create)};
+  ELSE
+${adds.join('\n')}
+  END IF;
+END
+$sqlcpy$`;
+  }
+
+  if (t.kind === 'd') {
+    const [cons] = await pool.query(
+      "SELECT conname AS name, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE contypid = $1 AND contype = 'c' ORDER BY conname", [t.oid]);
+    return `CREATE DOMAIN ${quote(name)} AS ${t.base}` +
+      (t.collation ? ` COLLATE ${t.collation}` : '') +
+      (t.def != null ? ` DEFAULT ${t.def}` : '') +
+      (t.notnull ? ' NOT NULL' : '') +
+      cons.map((k) => ` CONSTRAINT ${quote(k.name)} ${k.def.replace(/ NOT VALID$/, '')}`).join('');
+  }
+
+  if (t.kind === 'c') {
+    const [attrs] = await pool.query(
+      `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, ${COLLATION_OF('a.attcollation', 'ty.typcollation')} AS collation
+         FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid
+        WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, [t.relid]);
+    return `CREATE TYPE ${quote(name)} AS (${attrs.map((a) => `${quote(a.name)} ${a.type}${a.collation ? ` COLLATE ${a.collation}` : ''}`).join(', ')})`;
+  }
+
+  const [rng] = await pool.query(
+    `SELECT format_type(g.rngsubtype, NULL) AS sub, ${COLLATION_OF('g.rngcollation', 'st.typcollation')} AS collation,
+            CASE WHEN g.rngsubdiff <> 0 THEN g.rngsubdiff::regproc::text END AS diff
+       FROM pg_range g JOIN pg_type st ON st.oid = g.rngsubtype WHERE g.rngtypid = $1`, [t.oid]);
+  const g = rng[0];
+  const opts = [`SUBTYPE = ${g.sub}`];
+  if (g.collation) opts.push(`COLLATION = ${g.collation}`);
+  if (g.diff) opts.push(`SUBTYPE_DIFF = ${g.diff}`);
+  return `CREATE TYPE ${quote(name)} AS RANGE (${opts.join(', ')})`;
+}
+
+/**
+ * CREATE statement for a free-standing sequence. forCopy: a block that creates it or aligns an existing one (a sequence
+ * a column default uses cannot be dropped), followed by setval so the slave carries on from the master's position.
+ * The position is not part of the compared definition, so a sequence that merely advanced still counts as in sync.
+ */
+async function sequenceSql(pool, name, forCopy = false) {
+  const [r] = await pool.query(
+    `SELECT data_type::text AS type, start_value, min_value, max_value, increment_by, cycle, cache_size, last_value
+       FROM pg_sequences WHERE schemaname = $1 AND sequencename = $2`, [pool.schema, name]);
+  if (!r.length) throw missing('sequences', name);
+  const s = r[0];
+  const opts = `AS ${s.type} INCREMENT BY ${s.increment_by} MINVALUE ${s.min_value} MAXVALUE ${s.max_value} START WITH ${s.start_value} CACHE ${s.cache_size} ${s.cycle ? 'CYCLE' : 'NO CYCLE'}`;
+  const create = `CREATE SEQUENCE ${quote(name)} ${opts}`;
+  if (!forCopy) return create;
+  const stmts = [`DO $sqlcpy$
+BEGIN
+  IF to_regclass(${lit(quote(name))}) IS NULL THEN
+    EXECUTE ${lit(create)};
+  ELSE
+    EXECUTE ${lit(`ALTER SEQUENCE ${quote(name)} ${opts}`)};
+  END IF;
+END
+$sqlcpy$`];
+  if (s.last_value != null) stmts.push(`SELECT setval(${lit(quote(name))}, ${s.last_value}, true)`); // last_value is null until first use
+  return stmts.join(';\n');
+}
+
 async function getCreateSql(pool, kind, name, forCopy = false) {
+  if (kind === 'types') return typeSql(pool, name, forCopy);
+  if (kind === 'sequences') return sequenceSql(pool, name, forCopy);
   if (kind === 'tables') return tableSql(pool, name, forCopy);
   if (kind === 'views') return viewSql(pool, name);
   if (kind === 'triggers') return triggerSql(pool, name);
@@ -514,6 +627,22 @@ async function assertReadOnly(pool) {
  */
 function dropSql(kind, name) {
   if (kind === 'views') return `DROP VIEW IF EXISTS ${quote(name)}`;
+  if (kind === 'types') { // enums are brought up to date in place (see typeSql); the others are dropped and re-created
+    return `DO $sqlcpy$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type WHERE oid = to_regtype(${lit(quote(name))}) AND typtype = 'e') THEN RETURN; END IF;
+  DROP TYPE IF EXISTS ${quote(name)};
+END
+$sqlcpy$`;
+  }
+  if (kind === 'sequences') { // one a column default still uses stays and is aligned in place (see sequenceSql)
+    return `DO $sqlcpy$
+BEGIN
+  DROP SEQUENCE IF EXISTS ${quote(name)};
+EXCEPTION WHEN dependent_objects_still_exist THEN NULL;
+END
+$sqlcpy$`;
+  }
   if (kind === 'triggers') {
     const dot = name.lastIndexOf('.');
     return `DROP TRIGGER IF EXISTS ${quote(name.slice(dot + 1))} ON ${quote(name.slice(0, dot))}`;

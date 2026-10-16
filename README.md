@@ -97,6 +97,12 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO backup_user;
 
 Supported: PostgreSQL 12 or newer, copied between two databases (or two schemas) on the same engine. There is no `pg_dump` dependency: definitions are rebuilt from the system catalogs.
 
+PostgreSQL also lists two kinds that must exist before the tables that use them, so copy these sections first (they are shown first):
+- **Types** – enums, domains, composite and range types. An enum that already exists on the slave is updated in place (missing labels are added), so a new label reaches tables that use it; the other types are dropped and re-created, which fails if a table on the slave uses them.
+- **Sequences** – free-standing sequences only (those behind `serial` / identity columns come with their table). The slave sequence is aligned in place and moved to the master's current position; the position itself is not part of the comparison.
+
+Extensions (`CREATE EXTENSION`) are not copied: install the ones the master uses on the slave server yourself.
+
 **What is copied** — tables (columns, defaults, `serial` / identity / generated columns, primary / unique / check / foreign-key / exclusion constraints, indexes, comments, `UNLOGGED`, storage options, and partitioned tables with their partitions), views, functions, procedures and triggers. Row data is moved as text, exactly as the server prints it (the integration tests cover arrays, `jsonb`, `bytea`, numerics, dates and timestamps with microseconds, unicode, quotes and backslashes). Sequences are moved past the loaded rows so new inserts on the slave do not collide.
 
 **How it behaves**

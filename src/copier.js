@@ -247,7 +247,7 @@ async function copyDefinition(ctx, kind, item, onProgress) {
   const { master, slave, cfg, driver } = ctx;
   const started = Date.now();
   onProgress({ phase: 'schema', rowsDone: 0, rowsTotal: 1, bytesDone: 0, chunk: 0, chunks: 1, started });
-  const sql = driver.normalizeSql(await driver.getCreateSql(master, kind, item.name), cfg.master.database);
+  const sql = driver.normalizeSql(await driver.getCreateSql(master, kind, item.name, true), cfg.master.database);
   const dump = openDump(cfg, kind, item.name);
   try {
     const drop = driver.dropSql(kind, item.name);

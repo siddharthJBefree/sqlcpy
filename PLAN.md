@@ -26,7 +26,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 
 ### Core copy engine
 - ✅ Scan master and slave, compare objects one at a time (gentle on master)
-- ✅ Object kinds: tables, views, stored procedures, functions, triggers
+- ✅ Object kinds: tables, views, stored procedures, functions, triggers; PostgreSQL also types (enum / domain / composite / range) and standalone sequences
 - ✅ Status per object: in sync / differs / missing in slave / only in slave / queued / copying / error
 - ✅ Compare = normalized DDL + `COUNT(*)` + `CHECKSUM TABLE` (tables up to `CHECKSUM_MAX_MB`)
 - ✅ Table copy: `SHOW CREATE TABLE` → local dump `dumps/<db>/<table>.sql` → applied to slave in ~1 MB keyset-paginated chunks

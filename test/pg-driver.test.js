@@ -38,6 +38,8 @@ test('drop statements address overloads, triggers and tables', () => {
   assert.equal(pg.dropSql('functions', 'add_one(i integer)'), 'DROP FUNCTION IF EXISTS "add_one"(i integer)');
   assert.equal(pg.dropSql('procedures', 'bump(IN uid integer)'), 'DROP PROCEDURE IF EXISTS "bump"(IN uid integer)');
   assert.equal(pg.dropSql('triggers', 'users.users_trim'), 'DROP TRIGGER IF EXISTS "users_trim" ON "users"');
+  assert.match(pg.dropSql('types', 'mood'), /typtype = 'e'\) THEN RETURN;[\s\S]*DROP TYPE IF EXISTS "mood";/, 'enums are updated in place, other types dropped');
+  assert.match(pg.dropSql('sequences', 'seq'), /DROP SEQUENCE IF EXISTS "seq";\s*EXCEPTION WHEN dependent_objects_still_exist/);
   const table = pg.dropSql('tables', "o'brien");
   assert.match(table, /DROP TABLE IF EXISTS "o'brien";/);
   assert.match(table, /to_regclass\('"o''brien"'\)/, 'name is quoted as an identifier, then as a literal');

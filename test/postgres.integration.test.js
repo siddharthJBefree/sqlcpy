@@ -22,6 +22,13 @@ const MASTER = 'sqlcpy_it_master';
 const SLAVE = 'sqlcpy_it_slave';
 
 const MASTER_SQL = `
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+CREATE TYPE "Perm Kind" AS ENUM ('read', 'write');
+CREATE DOMAIN positive_int AS integer NOT NULL DEFAULT 1 CONSTRAINT positive_chk CHECK (VALUE > 0);
+CREATE TYPE address AS (street text, zip varchar(10), mood mood);
+CREATE TYPE intspan AS RANGE (subtype = integer, subtype_diff = int4range_subdiff);
+CREATE SEQUENCE ticket_seq AS bigint START 100 INCREMENT 5 CACHE 1;
+SELECT setval('ticket_seq', 120);
 CREATE TABLE users (
   id serial PRIMARY KEY,
   external_id varchar(32) NOT NULL UNIQUE,
@@ -36,6 +43,12 @@ CREATE TABLE users (
   born date,
   avatar bytea,
   label text GENERATED ALWAYS AS (display_name || '!') STORED,
+  mood mood NOT NULL DEFAULT 'ok',
+  kinds "Perm Kind"[],
+  level positive_int,
+  home address,
+  span intspan,
+  ticket bigint NOT NULL DEFAULT nextval('ticket_seq'),
   CONSTRAINT balance_nonneg CHECK (balance >= 0)
 );
 COMMENT ON TABLE users IS 'the app''s users';
@@ -64,7 +77,7 @@ CREATE PROCEDURE bump(IN uid int) LANGUAGE plpgsql AS $$ BEGIN UPDATE users SET 
 CREATE FUNCTION trim_name() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.display_name := trim(NEW.display_name); RETURN NEW; END $$;
 CREATE TRIGGER users_trim BEFORE INSERT OR UPDATE ON users FOR EACH ROW EXECUTE FUNCTION trim_name();
 
-INSERT INTO users (external_id, email, display_name, tags, meta, balance, score, active, created_at, born, avatar)
+INSERT INTO users (external_id, email, display_name, tags, meta, balance, score, active, created_at, born, avatar, mood, kinds, level, home, span)
 SELECT 'ext-' || g,
        CASE WHEN g % 7 = 0 THEN NULL ELSE 'user' || g || '@Example.com' END,
        CASE g % 5 WHEN 0 THEN 'O''Brien \\ back' WHEN 1 THEN 'Zoë 日本語 🎉' WHEN 2 THEN E'multi\\nline\\ttab' ELSE 'plain ' || g END,
@@ -75,7 +88,12 @@ SELECT 'ext-' || g,
        g % 2 = 0,
        timestamptz '2026-01-01 00:00:00+00' + (g || ' minutes')::interval + (g % 1000 || ' microseconds')::interval,
        CASE WHEN g % 6 = 0 THEN NULL ELSE date '2000-01-01' + g END,
-       CASE WHEN g % 8 = 0 THEN decode(lpad(to_hex(g), 8, '0'), 'hex') END
+       CASE WHEN g % 8 = 0 THEN decode(lpad(to_hex(g), 8, '0'), 'hex') END,
+       (ARRAY['sad', 'ok', 'happy'])[1 + g % 3]::mood,
+       CASE WHEN g % 2 = 0 THEN ARRAY['read', 'write']::"Perm Kind"[] END,
+       g,
+       CASE WHEN g % 5 = 0 THEN ROW('1 Main, St', '12345', 'happy')::address END,
+       intspan(g, g + 10)
 FROM generate_series(1, 2500) g;
 INSERT INTO orders (user_id, total, placed_at)
 SELECT 1 + g % 2500, (g % 500) + 0.25, timestamp '2026-02-01' + (g || ' seconds')::interval FROM generate_series(1, 3000) g;
@@ -122,9 +140,10 @@ function config(dir, rules) {
   };
 }
 
-const ORDER = ['functions', 'procedures', 'tables', 'views', 'triggers'];
+const ORDER = ['types', 'sequences', 'functions', 'procedures', 'tables', 'views', 'triggers'];
 // dependencies first (parents before children, views before the views built on them), as an operator would copy them
 const WITHIN_KIND = {
+  types: ['mood', 'Perm Kind', 'positive_int', 'address', 'intspan'], // address uses mood
   tables: ['users', 'orders', 'Mixed Case', 'nopk', 'audit', 'secrets', 'measurements'],
   views: ['order_totals', 'big_spenders'],
 };
@@ -153,6 +172,8 @@ test('postgres: copy a rich schema and compare reports in sync', { skip }, async
   await t.test('scan lists every object kind; partitions are folded into their parent', async () => {
     await app.scan({ force: true });
     const names = (kind) => app.items.filter((i) => i.kind === kind).map((i) => i.name).sort();
+    assert.deepEqual(names('types'), ['Perm Kind', 'address', 'intspan', 'mood', 'positive_int']);
+    assert.deepEqual(names('sequences'), ['ticket_seq'], 'sequences owned by serial / identity columns are not listed');
     assert.deepEqual(names('tables'), ['Mixed Case', 'audit', 'measurements', 'nopk', 'orders', 'secrets', 'users']);
     assert.deepEqual(names('views'), ['big_spenders', 'order_totals']);
     assert.deepEqual(names('functions'), ['add_one(i bigint)', 'add_one(i integer)', 'trim_name()']);
@@ -169,8 +190,22 @@ test('postgres: copy a rich schema and compare reports in sync', { skip }, async
     assert.equal(byName(app, 'tables', 'users').masterRows, 2500);
   });
 
+  await t.test('types and sequences: a new enum label reaches a slave whose tables already use the type', async () => {
+    const seq = await admin(SLAVE, `SELECT last_value FROM ticket_seq`);
+    assert.equal(Number(seq.rows[0].last_value), 120 + 5 * 2500, 'the slave sequence carries on from the master position');
+    await admin(MASTER, `ALTER TYPE mood ADD VALUE 'ecstatic' AFTER 'happy'; ALTER TYPE mood ADD VALUE 'grim' BEFORE 'sad'`);
+    await app.scan({ force: true });
+    assert.equal(byName(app, 'types', 'mood').status, 'different');
+    await app.copy(byName(app, 'types', 'mood'));
+    assert.equal(byName(app, 'types', 'mood').status, 'same');
+    const r = await admin(SLAVE, `SELECT string_agg(enumlabel, ',' ORDER BY enumsortorder) AS l FROM pg_enum WHERE enumtypid = 'mood'::regtype`);
+    assert.equal(r.rows[0].l, 'grim,sad,ok,happy,ecstatic');
+    await app.copy(byName(app, 'sequences', 'ticket_seq')); // in use by users.ticket: aligned in place, not dropped
+    assert.equal(byName(app, 'sequences', 'ticket_seq').status, 'same');
+  });
+
   await t.test('values survive exactly (quotes, unicode, arrays, json, bytea, timestamps, nulls)', async () => {
-    const q = (db) => admin(db, `SELECT id, external_id, email, display_name, tags, meta, balance, score, active, created_at, born, encode(avatar, 'hex') AS av, label FROM users ORDER BY id`);
+    const q = (db) => admin(db, `SELECT id, external_id, email, display_name, tags, meta, balance, score, active, created_at, born, encode(avatar, 'hex') AS av, label, mood, kinds, level, home, span, ticket FROM users ORDER BY id`);
     const [m, s] = [await q(MASTER), await q(SLAVE)];
     assert.equal(s.rows.length, 2500);
     assert.deepEqual(s.rows, m.rows);

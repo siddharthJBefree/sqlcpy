@@ -27,6 +27,7 @@ const HINTS = {
   '42501': 'User lacks a required privilege (SELECT on master / CREATE and write access on slave).',
   '42P01': 'A table this object depends on does not exist on the slave. Copy tables before views/triggers, and parent tables before the tables that reference them.',
   '42883': 'A function this object depends on does not exist on the slave. Copy functions before triggers and tables.',
+  '42704': 'A type (enum, domain ...) this object uses does not exist on the slave. Copy the Types and Sequences sections first, then the tables.',
   '23503': 'Foreign key violation. Copy the parent table first, or let the slave user SET session_replication_role (superuser) so loads skip FK checks.',
   '2BP01': 'Other objects on the slave (views, functions, ...) depend on this one. Drop or copy those first - nothing is dropped with CASCADE.',
   '55P03': 'Timed out waiting for a lock. Try again when the table is less busy.',
