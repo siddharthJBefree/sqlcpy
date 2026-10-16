@@ -30,6 +30,7 @@ const { createMaskProblem } = require('./maskcheck');
 
 const KINDS = ['tables', 'views', 'procedures', 'functions', 'triggers'];
 const quote = (id) => SqlString.escapeId(id);
+const STRICT_MODES = new Set(['STRICT_TRANS_TABLES', 'STRICT_ALL_TABLES']);
 
 function createPool(c, concurrency = 1) {
   return mysql.createPool({
@@ -269,12 +270,19 @@ module.exports = {
   hasForeignKeys,
   assertReadOnly,
   swapSql: (table, fresh, old) => `RENAME TABLE ${quote(table)} TO ${quote(old)}, ${quote(fresh)} TO ${quote(table)}`,
+  // Strict mode is switched off so rows are copied exactly as the master holds them: a master that was loaded
+  // non-strictly can contain values strict mode rejects (e.g. the invalid-enum '' stored as index 0, which fails
+  // with WARN_DATA_TRUNCATED), as well as zero dates and over-long values.
   async sessionSetup(conn) {
-    await conn.query('SET FOREIGN_KEY_CHECKS=0, UNIQUE_CHECKS=0, SQL_MODE=CONCAT(@@sql_mode, \',NO_AUTO_VALUE_ON_ZERO\')');
+    const [r] = await conn.query('SELECT @@sql_mode AS m');
+    conn.sqlcpyPrevMode = String(r[0].m || '');
+    const modes = conn.sqlcpyPrevMode.split(',').filter((m) => m && !STRICT_MODES.has(m.toUpperCase()));
+    modes.push('NO_AUTO_VALUE_ON_ZERO');
+    await conn.query('SET FOREIGN_KEY_CHECKS=0, UNIQUE_CHECKS=0, SQL_MODE=?', [modes.join(',')]);
   },
   async sessionTeardown(conn) {
-    await conn.query('SET FOREIGN_KEY_CHECKS=1, UNIQUE_CHECKS=1');
+    await conn.query('SET FOREIGN_KEY_CHECKS=1, UNIQUE_CHECKS=1, SQL_MODE=?', [conn.sqlcpyPrevMode || '']);
   },
-  dumpPreamble: 'SET FOREIGN_KEY_CHECKS=0;\nSET UNIQUE_CHECKS=0;\n',
+  dumpPreamble: "SET FOREIGN_KEY_CHECKS=0;\nSET UNIQUE_CHECKS=0;\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\n",
   dropSql: (kind, name) => `DROP ${DROP[kind]} IF EXISTS ${quote(name)}`,
 };
