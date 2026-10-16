@@ -93,7 +93,7 @@ class SqlCpy extends EventEmitter {
 
   get cacheKey() {
     const { cfg } = this;
-    const side = (x) => `${x.host}:${x.port}/${x.database}`;
+    const side = (x) => `${x.host}:${x.port}/${x.database}${x.schema ? '#' + x.schema : ''}`;
     return `${cfg.type}|${side(cfg.master)}|${side(cfg.slave)}|rules:${this.rules.fingerprint}`;
   }
 

@@ -15,6 +15,8 @@ function load(envPath) {
     user: e[`${p}_USERNAME`],
     password: e[`${p}_PASSWORD`] || '',
     database: e[`${p}_DATABASE`],
+    schema: e[`${p}_SCHEMA`] || undefined, // engines with schemas inside a database (PostgreSQL); others ignore it
+    ssl: e[`${p}_SSL`] || undefined,       // PostgreSQL: true | no-verify
   });
   const cfg = {
     type, // master and slave are always the same engine

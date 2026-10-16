@@ -1,6 +1,6 @@
 # sqlcpy
 
-Interactive terminal tool (npkill-style) that copies MySQL **tables, views, stored procedures, functions and triggers** from a *master* database to a *slave* database — in small chunks so the master never hangs.
+Interactive terminal tool (npkill-style) that copies **tables, views, stored procedures, functions and triggers** from a *master* database to a *slave* database — in small chunks so the master never hangs. Works with **MySQL / MariaDB** and **PostgreSQL** (master and slave must be the same engine).
 
 ## Features
 
@@ -12,94 +12,16 @@ Interactive terminal tool (npkill-style) that copies MySQL **tables, views, stor
 - Docker-pull style progress: bar, rows, chunk n/N, speed, ETA
 - Policy file: ignore tables, keep sensitive data on the master, copy only the latest rows of huge tables (see [Policy file](#policy-file))
 
-## Install
-
-```bash
-cd backup-script
-npm install
-npm link        # makes the `sqlcpy` command available globally
-```
-
-Without linking you can always run `npm start` (or `node bin/sqlcpy.js`) from the project folder.
-
-## Build a standalone Linux binary
-
-The binary includes the Node.js runtime and project dependencies, so Node.js and npm
-are not needed on the QA server. Build it from the project directory on a machine with
-Node.js and npm installed:
+## Install and run
 
 ```bash
 npm install
-npm run build:linux-x64
+npm start                 # interactive terminal UI
+npm run daemon            # unattended, follows schedule.cron (see Scheduled runs)
+npm run run-once          # one scheduled pass, then exit
 ```
 
-This creates `dist/sqlcpy-linux-x64` for Linux x86_64/amd64. Copy it to the QA server,
-then make it executable if needed:
-
-```bash
-chmod +x sqlcpy-linux-x64
-./sqlcpy-linux-x64
-./sqlcpy-linux-x64 run-once path/to/.env
-./sqlcpy-linux-x64 daemon path/to/.env
-```
-
-Keep `.env` and `sqlcpy.config.jsonc` outside the binary. By default sqlcpy reads them
-from the current working directory; pass an env-file path as shown above or use
-`CONFIG_FILE` to point to the policy file. The server must be Linux x86_64 with glibc
-(Alpine/musl is not supported by this target).
-
-## Build a standalone Windows binary
-
-Build the Windows x64 executable from the project directory on a machine with Node.js
-and npm installed:
-
-```powershell
-npm install
-npm run build:windows-x64
-```
-
-This creates `dist/sqlcpy-win-x64.exe` for Windows x64. Copy the executable to the QA
-server and run it from the directory containing `.env` and `sqlcpy.config.jsonc`:
-
-```powershell
-.\sqlcpy-win-x64.exe
-.\sqlcpy-win-x64.exe run-once .\.env
-.\sqlcpy-win-x64.exe daemon .\.env
-```
-
-Keep `.env` and `sqlcpy.config.jsonc` outside the executable. Both standalone targets
-include Node.js and do not require it to be installed on the server.
-
-## Build standalone macOS binaries
-
-Build the executable for your Mac architecture from the project directory on a machine
-with Node.js and npm installed. Build both architectures with:
-
-```bash
-npm install
-npm run build:macos
-```
-
-Or build only one target:
-
-```bash
-npm run build:macos-x64     # Intel Macs
-npm run build:macos-arm64   # Apple Silicon (M1/M2/M3/M4)
-```
-
-The executables are written to `dist/sqlcpy-macos-x64` and
-`dist/sqlcpy-macos-arm64`. Copy the matching executable and your external `.env` and
-`sqlcpy.config.jsonc` files to the Mac. Because cross-built macOS executables are not
-signed on this build machine, ad-hoc sign the executable on the Mac before its first run:
-
-```bash
-codesign --force --sign - ./sqlcpy-macos-arm64
-chmod +x sqlcpy-macos-arm64
-./sqlcpy-macos-arm64 run-once ./.env
-```
-
-Replace the filename with `sqlcpy-macos-x64` for an Intel Mac. The macOS executables
-bundle Node.js; Node.js and npm are not needed on the target Mac.
+Everything is started through npm; there is no global command. To use another env file, pass it after `--`: `npm start -- path/to/.env`.
 
 ## Configure
 
@@ -119,17 +41,30 @@ SLAVE_PASSWORD=secret
 SLAVE_DATABASE=bdms
 
 # optional
-DB_TYPE=mysql           # engine; master and slave must be the same type (mysql, mariadb)
+DB_TYPE=mysql           # engine; master and slave must be the same type (mysql, mariadb, postgres)
 CHUNK_BYTES=1048576     # target size of each chunk
 CHUNK_DELAY_MS=100      # pause between chunks
-CHECKSUM_MAX_MB=50      # skip CHECKSUM TABLE above this size
+CHECKSUM_MAX_MB=50      # skip the data checksum above this size
 CONCURRENCY=1           # chunks downloaded/inserted in parallel per table, whole number 1-10
 DUMP_DIR=./dumps
 CONFIG_FILE=./sqlcpy.config.jsonc   # policy file (default shown); must exist if you set it
 MASK_SALT=some-long-random-string   # required only if the policy uses "hash" masking
 ```
 
-A different env file can be passed as the first argument: `sqlcpy path/to/.env`.
+A different env file can be passed after `--`: `npm start -- path/to/.env`.
+
+For PostgreSQL set `DB_TYPE=postgres` (`postgresql` / `pg` also work); the port defaults to 5432 and these extras apply:
+
+```env
+DB_TYPE=postgres
+MASTER_PORT=5432
+MASTER_SCHEMA=public    # schema to copy (default: public); master and slave schemas may differ
+MASTER_SSL=true         # true = encrypted + verified, no-verify = encrypted, certificate not checked (default: off)
+SLAVE_SCHEMA=public
+SLAVE_SSL=true
+```
+
+See [PostgreSQL](#postgresql) for what is copied and what is not.
 
 ## Read-only master user
 
@@ -146,6 +81,43 @@ FLUSH PRIVILEGES;
 
 Then set `master.user` / `master.password` to that user. (`TRIGGER` and `EXECUTE` are only needed to read
 trigger and routine definitions; drop them if you don't copy those.)
+
+On PostgreSQL a read-only user needs `USAGE` on the schema and `SELECT` on its tables — definitions are read from the catalogs, which every user can see:
+
+```sql
+CREATE ROLE backup_user LOGIN PASSWORD 'change_me';
+GRANT CONNECT ON DATABASE your_database TO backup_user;
+GRANT USAGE ON SCHEMA public TO backup_user;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO backup_user;
+```
+
+(Function and procedure bodies are visible to any user who can see the function. If the guard is enabled it rejects a master user that is a superuser or holds `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE` on any table in the schema.)
+
+## PostgreSQL
+
+Supported: PostgreSQL 12 or newer, copied between two databases (or two schemas) on the same engine. There is no `pg_dump` dependency: definitions are rebuilt from the system catalogs.
+
+**What is copied** — tables (columns, defaults, `serial` / identity / generated columns, primary / unique / check / foreign-key / exclusion constraints, indexes, comments, `UNLOGGED`, storage options, and partitioned tables with their partitions), views, functions, procedures and triggers. Row data is moved as text, exactly as the server prints it (the integration tests cover arrays, `jsonb`, `bytea`, numerics, dates and timestamps with microseconds, unicode, quotes and backslashes). Sequences are moved past the loaded rows so new inserts on the slave do not collide.
+
+**How it behaves**
+
+- Objects live in `*_SCHEMA`; every connection pins `search_path` to it, so definitions are copied without schema names and master / slave schemas can differ. Names that need it are shown as `table.trigger` (triggers) and `name(arguments)` (overloaded functions / procedures).
+- All sessions are pinned to `UTC`, ISO dates and exact float printing, so master and slave data checksums compare like with like. `range` cut-offs are therefore evaluated in UTC.
+- Foreign keys: loads run with `session_replication_role = replica` so rows can arrive in any order. That needs a superuser (or `GRANT SET ON PARAMETER session_replication_role`); without it the load still works, but a child must then be copied **after** its parent. A table's own definition still needs the tables it references to exist, so copy parents first (a *copy all* pass may take a second round for deeply linked schemas).
+- Copying a table drops and recreates it. Foreign keys from other tables and views built on it (also through other views) are detached first and put back afterwards: the keys come back `NOT VALID` (a `range`, masked or schema-only parent can legitimately leave child rows without a parent), and a view or key that no longer fits is skipped with a server warning and then shows as *missing* / *differs*. Nothing is dropped with `CASCADE`, so anything else that depends on the table (a materialized view, say) makes the copy fail with a message instead of being lost.
+- Data checksum: there is no `CHECKSUM TABLE`, so an order-independent md5 digest of every column is compared instead (same size limit, `CHECKSUM_MAX_MB`).
+- Sensitive-column masking works as on MySQL, with the replacement computed by the master inside the `SELECT`. It supports text, numeric and date/time columns; other types (`boolean`, `uuid`, `json` ...) can only be masked with `null`. `hash` is the SHA-256 (hex) of the salt plus the value.
+
+**Not copied** (create these on the slave first / separately): extensions and the types they provide, custom types (`CREATE TYPE ... AS ENUM`, composites, domains), standalone sequences used in column defaults, materialized views, table inheritance (`INHERITS`), row-level-security policies, grants, ownership, tablespaces, and objects in other schemas. Objects that belong to an extension (for example PostGIS tables and functions) are ignored.
+
+`atomicSwap` is not available on PostgreSQL (index and constraint names are schema-wide, so a temporary copy cannot be built beside the original); tables are dropped and recreated, and the schedule log says so.
+
+**Tests.** `node --test test/*.test.js` runs the unit tests. `test/postgres.integration.test.js` needs a server and is skipped unless `SQLCPY_TEST_PG` is set (it creates and drops the databases `sqlcpy_it_master` / `sqlcpy_it_slave`):
+
+```bash
+docker run -d --name pgtest -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:17
+SQLCPY_TEST_PG=postgres://postgres:pw@127.0.0.1:55432 node --test test/postgres.integration.test.js
+```
 
 ## Policy file
 
@@ -219,8 +191,8 @@ Add a `schedule` block to `sqlcpy.config.jsonc` (cron syntax as on [crontab.guru
 ```
 
 ```
-sqlcpy daemon [path/to/.env]     # stays running, fires on "cron" (run under pm2 / systemd / a Windows service)
-sqlcpy run-once [path/to/.env]   # one pass, exit code 0 ok · 1 error · 2 a table failed (for OS cron / Task Scheduler)
+npm run daemon [-- path/to/.env]     # stays running, fires on "cron" (run under pm2 / systemd / a Windows service)
+npm run run-once [-- path/to/.env]   # one pass, exit code 0 ok · 1 error · 2 a table failed (for OS cron / Task Scheduler)
 ```
 
 - No terminal is needed. Each run re-reads the config file and logs to `<DUMP_DIR>/sqlcpy-schedule.log`.
@@ -269,7 +241,7 @@ await app.close();
 
 ## Warning
 
-Copying a table **drops and recreates it on the slave** (foreign key checks are disabled during the copy). Double-check `SLAVE_*` before pressing `space`.
+Copying a table **drops and recreates it on the slave** (foreign key checks are disabled during the copy; on PostgreSQL see the notes above). Double-check `SLAVE_*` before pressing `space`.
 
 ## License
 

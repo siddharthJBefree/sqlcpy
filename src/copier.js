@@ -26,7 +26,7 @@ function openDump(cfg, kind, name) {
 }
 
 function buildInserts(driver, table, fields, rows) {
-  const head = `INSERT INTO ${driver.quote(table)} (${fields.map(driver.quote).join(', ')}) VALUES\n`;
+  const head = `INSERT INTO ${driver.quote(table)} (${fields.map(driver.quote).join(', ')})${driver.insertModifier || ''} VALUES\n`;
   const stmts = [];
   let cur = [];
   let size = head.length;
@@ -151,7 +151,7 @@ async function copyTable(ctx, item, onProgress, signal) {
   // the dump keeps the real table name; only the statement sent to the slave is pointed at the temp table
   const retarget = (stmt) => (swap ? stmt.replace(`INSERT INTO ${esc(name)} `, () => `INSERT INTO ${esc(fresh)} `) : stmt);
   try {
-    swap = Boolean(ctx.swap && item.slave && scope.mode !== 'schema' && !(await driver.hasForeignKeys(slave, cfg.slave.database, name)));
+    swap = Boolean(ctx.swap && driver.supportsSwap !== false && item.slave && scope.mode !== 'schema' && !(await driver.hasForeignKeys(slave, cfg.slave.database, name)));
     onProgress({ phase: 'schema', rowsDone: 0, rowsTotal: 0, bytesDone: 0, chunk: 0, chunks: 0, started });
     const ddl = driver.normalizeSql(await driver.getCreateSql(master, 'tables', name), cfg.master.database);
     const drop = driver.dropSql('tables', name);
@@ -170,12 +170,13 @@ async function copyTable(ctx, item, onProgress, signal) {
     }
 
     if (scope.mode === 'schema') { // sensitive table: structure only, no row is ever read from the master
+      if (driver.afterLoad) await driver.afterLoad(conn, name);
       onProgress({ phase: 'done', rowsDone: 0, rowsTotal: 0, bytesDone: 0, chunk: 0, chunks: 0, started });
       return { file: dump.file, rows: 0, bytes: 0, note };
     }
 
     const where = scope.where || null;
-    const select = scope.select || '*';
+    const select = scope.select || (driver.selectList && await driver.selectList(master, cfg.master.database, name)) || '*';
     const total = await driver.count(master, name, where);
     const avg = Math.max(info.avgRowLength || 0, 1);
     const smallTable = (scope.range ? total * avg : info.dataBytes) <= cfg.chunkBytes;
@@ -224,6 +225,7 @@ async function copyTable(ctx, item, onProgress, signal) {
       if (rows.length < perChunk) break;
       if (cfg.chunkDelayMs) await sleep(cfg.chunkDelayMs); // let the master breathe
     }
+    if (driver.afterLoad) await driver.afterLoad(conn, name);
     if (swap) {
       await conn.query(driver.dropSql('tables', old));
       await conn.query(driver.swapSql(name, fresh, old));

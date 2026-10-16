@@ -1,6 +1,7 @@
 'use strict';
 const mysql = require('mysql2/promise');
 const SqlString = require('sqlstring');
+const { createMaskProblem } = require('./maskcheck');
 
 /**
  * Database driver: everything engine-specific lives here, so the copy / compare logic stays generic.
@@ -176,76 +177,9 @@ const STRING_TYPES = new Set(['char', 'varchar', 'tinytext', 'text', 'mediumtext
 const TEXT_TYPES = new Set(['char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext']);
 const NUMBER_TYPES = new Set(['tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint', 'decimal', 'numeric', 'float', 'double']);
 const TIME_TYPES = new Set(['date', 'datetime', 'timestamp']);
-const HASH_MIN_LENGTH = 16; // shorter hex strings collide too easily to keep unique indexes valid
 
 const isTemporal = (col) => TIME_TYPES.has(col.type);
-const maskCategory = (col) => (
-  STRING_TYPES.has(col.type) ? 'string'
-    : NUMBER_TYPES.has(col.type) ? 'number'
-      : TIME_TYPES.has(col.type) ? 'temporal' : null
-);
-
-/** Why `mode` cannot be applied to `col` on this engine, or null if it can. */
-function maskProblem(col, mode, columns) {
-  if (mode && typeof mode === 'object' && Object.prototype.hasOwnProperty.call(mode, 'value')) {
-    const value = mode.value;
-    if (value === null) return col.nullable ? null : 'is NOT NULL, so a null custom value would fail the insert';
-    const category = maskCategory(col);
-    if (typeof value === 'string' && (category === 'string' || category === 'temporal')) {
-      if (col.maxLen != null && value.length > col.maxLen) return `has length ${col.maxLen}, shorter than the custom value`;
-      return null;
-    }
-    if (typeof value === 'number' && Number.isFinite(value) && category === 'number') return null;
-    if (typeof value === 'boolean' && category === 'number') return null;
-    return `type ${col.type} is incompatible with the custom value`;
-  }
-  if (mode && typeof mode === 'object' && typeof mode.from === 'string') {
-    const source = columns.get(mode.from.toLowerCase());
-    if (!source) return `source column "${mode.from}" does not exist`;
-    const targetCategory = maskCategory(col);
-    if (!targetCategory || targetCategory !== maskCategory(source)) {
-      return `cannot derive from "${source.name}" (${source.type}) because it is not compatible with ${col.type}`;
-    }
-    if (!col.nullable && source.nullable) return `cannot derive from nullable column "${source.name}" because this column is NOT NULL`;
-    if (col.maxLen != null && source.maxLen != null && source.maxLen > col.maxLen) {
-      return `cannot derive from "${source.name}" because its maximum length (${source.maxLen}) exceeds ${col.maxLen}`;
-    }
-    return null;
-  }
-  if (mode && typeof mode === 'object' && Array.isArray(mode.concat)) {
-    if (!TEXT_TYPES.has(col.type)) return `"concat" needs a text column (is ${col.type})`;
-    let length = 0;
-    for (const part of mode.concat) {
-      if (typeof part === 'string') {
-        length += part.length;
-        continue;
-      }
-      const source = columns.get(part.column.toLowerCase());
-      if (!source) return `source column "${part.column}" does not exist`;
-      if (!TEXT_TYPES.has(source.type)) return `cannot concatenate "${source.name}" because it is not a text column`;
-      if (!col.nullable && source.nullable) return `cannot concatenate nullable column "${source.name}" into this NOT NULL column`;
-      if (source.maxLen == null) length = null;
-      else if (length != null) length += source.maxLen;
-    }
-    if (mode.maxLength != null) length = length == null ? mode.maxLength : Math.min(length, mode.maxLength);
-    if (length != null && col.maxLen != null && length > col.maxLen) {
-      return `may produce ${length} characters, exceeding its length limit of ${col.maxLen}`;
-    }
-    return null;
-  }
-  if (mode === 'random') {
-    if (TEXT_TYPES.has(col.type) || NUMBER_TYPES.has(col.type)) return null;
-    return `"random" needs a text or numeric column (is ${col.type})`;
-  }
-  if (mode === 'null') return col.nullable ? null : 'is NOT NULL, so "null" would fail the insert – use "empty" or "hash"';
-  if (mode === 'empty') return STRING_TYPES.has(col.type) || NUMBER_TYPES.has(col.type) ? null : `type ${col.type} cannot be blanked – use "null"`;
-  if (mode === 'hash') {
-    if (!STRING_TYPES.has(col.type)) return `"hash" needs a text/binary column (is ${col.type})`;
-    if (col.maxLen != null && col.maxLen < HASH_MIN_LENGTH) return `is only ${col.maxLen} characters – too short to hash without collisions, use "empty" or "null"`;
-    return null;
-  }
-  return `unknown mode ${mode}`;
-}
+const maskProblem = createMaskProblem({ stringTypes: STRING_TYPES, textTypes: TEXT_TYPES, numberTypes: NUMBER_TYPES, timeTypes: TIME_TYPES });
 
 /** SQL expression that stands in for a sensitive column in the SELECT, so the real value never leaves the master. */
 function maskExpr(col, mode, salt) {
@@ -307,6 +241,13 @@ const DROP = { tables: 'TABLE', views: 'VIEW', procedures: 'PROCEDURE', function
 
 module.exports = {
   name: 'mysql',
+  versionLabel: (v) => `MySQL ${v}`,
+  readOnlyGrants: (c) => [
+    `CREATE USER 'backup_user'@'%' IDENTIFIED BY 'change_me';`,
+    `GRANT SELECT, SHOW VIEW, TRIGGER, EXECUTE ON \`${c.database}\`.* TO 'backup_user'@'%';`,
+    `GRANT SHOW_ROUTINE ON *.* TO 'backup_user'@'%';`,
+    'FLUSH PRIVILEGES;',
+  ],
   defaultPort: 3306,
   kinds: KINDS,
   createPool,

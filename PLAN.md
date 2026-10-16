@@ -14,7 +14,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 |---|---|---|
 | 0.x | MySQL / MariaDB copy tool + TUI | ✅ Done |
 | 1 | Driver contract refactor (no new DB) | 📋 Next |
-| 2 | PostgreSQL + SQLite | 📋 Planned |
+| 2 | PostgreSQL ✅ · SQLite 📋 | 🚧 In progress |
 | 3 | SQL Server + Oracle | 📋 Planned |
 | 4 | IBM Db2 | 📋 Planned |
 | 5 | Snowflake + Databricks (+ clone fast path) | 🔮 Later |
@@ -40,7 +40,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 
 ### Architecture
 - ✅ Engine-specific code isolated behind a driver contract (`src/drivers/`)
-- ✅ `DB_TYPE` selects the driver; `mariadb` aliases `mysql`
+- ✅ `DB_TYPE` selects the driver (loaded lazily); `mariadb` aliases `mysql`; `postgres` / `postgresql` / `pg` select PostgreSQL
+- ✅ Shared sensitive-column validation (`src/drivers/maskcheck.js`): each driver only supplies its type vocabulary
 - ✅ Library class `SqlCpy` (EventEmitter) usable without the TUI
 
 ### Terminal UI
@@ -52,6 +53,16 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 - ✅ Scan cache – instant startup from `.sqlcpy-cache.json`, `R` rescan all, `r` rescan one
 - ✅ Distinct status symbols (`●` `◐` `○` `◇` `◆` `▲`) and relative time ("just now")
 - ✅ SCOPE column (`schema only` / `masked` / `30d`), `· N ignored` in the header, policy + stale-dump warnings in the log
+
+### PostgreSQL (12+)
+- ✅ `src/drivers/pg.js` (`pg`): definitions rebuilt from `pg_catalog` – tables (serial / identity / generated columns, constraints, indexes, comments, `UNLOGGED`, partitioned tables with their partitions), views, overloaded functions, procedures, triggers
+- ✅ `*_SCHEMA` (connection `search_path` pinned, so master and slave schemas may differ) and `*_SSL`
+- ✅ Values travel as text and sessions are pinned (UTC, ISO dates, exact floats), so rows round-trip exactly and master / slave checksums agree; order-independent md5 digest replaces `CHECKSUM TABLE`
+- ✅ Loads under `session_replication_role = replica` when permitted; dropping a table detaches and restores the foreign keys and views that depend on it (no `CASCADE`); sequences are advanced past loaded rows
+- ✅ Row size is measured when statistics are missing (fresh tables have `reltuples = -1`), so chunking still honours `CHUNK_BYTES`
+- ✅ Tests: pure-helper unit tests, plus a Docker-backed integration suite (`SQLCPY_TEST_PG`) covering copy → compare, value fidelity, chunked / parallel loads, FK + view restore, masking, ranges, read-only guard
+- ⚠️ Not copied: extensions, custom types, standalone sequences, materialized views, `INHERITS`, RLS policies, grants, ownership. `atomicSwap` unsupported
+- 🔮 `CREATE TYPE` / sequence / matview kinds; dependency-ordered "copy all" (parents before children, views before dependent views); exercising the PG-version matrix (only 17 tested)
 
 ### Policy file (`sqlcpy.config.jsonc`)
 - ✅ `ignore` – glob patterns; hidden from scan, compare and copy (triggers on ignored tables too)
@@ -68,7 +79,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 
 ## ⚙️ Config (.env)
 
-`MASTER_*` and `SLAVE_*` (HOST, PORT, USERNAME, PASSWORD, DATABASE), plus `DB_TYPE` (default `mysql`).
+`MASTER_*` and `SLAVE_*` (HOST, PORT, USERNAME, PASSWORD, DATABASE; PostgreSQL also SCHEMA and SSL), plus `DB_TYPE` (default `mysql`).
 
 | Option | Default | Notes |
 |---|---|---|
@@ -88,14 +99,14 @@ Legend: ✅ done · 🚧 in progress · 📋 planned · 🔮 later / optional ·
 | `src/config.js` | read .env, validate, load the policy |
 | `src/rules.js` | policy file: JSONC parse, strict validation, glob matching, per-table rule lookup |
 | `src/scope.js` | turn a table's rule into SQL (select list, range `WHERE`, paging order), validated against the live schema |
-| `src/drivers/` | one module per engine (`mysql.js`): pool, quoting, list objects, DDL, PK, count/checksum, session setup. Selected by `DB_TYPE` |
+| `src/drivers/` | one module per engine (`mysql.js`, `pg.js`): pool, quoting, list objects, DDL, PK, count/checksum, session setup. Selected by `DB_TYPE`. `maskcheck.js` is the shared masking validator |
 | `src/objects.js` | object kinds + labels |
 | `src/compare.js` | decide in-sync / different / missing / extra (scope-aware: range, masked, schema-only) |
 | `src/copier.js` | dump + copy one object; tables use keyset-paginated chunks with a pause between chunks |
 | `src/errors.js` | map driver errors to readable messages |
 | `src/index.js` | `SqlCpy` library class – scan(), copy(), compare() |
 | `src/ui.js` | TUI: sections, cursor, status, progress, log view |
-| `bin/sqlcpy.js` | CLI entry |
+| `src/cli.js` | entry for `npm start` / `npm run daemon` / `npm run run-once` |
 
 ## ⌨️ Keys
 
@@ -136,13 +147,15 @@ MySQL assumptions still leak out of the driver into `copier.js`, `compare.js` an
 | `getConnection()` / `.release()` assumed | wrapper that fakes a pool for single-connection engines |
 | "Is MySQL running?" in `errors.js` | per-driver error hints |
 
+> PostgreSQL shipped ahead of this refactor: its pool wrapper translates `?` placeholders and the result shape at the driver edge, and Postgres supports `LIMIT/OFFSET` and row-value keyset comparison natively, so the generic code needed only small optional hooks (`insertModifier`, `selectList`, `afterLoad`, `supportsSwap`). The leaks below still matter for SQL Server / Oracle.
+
 Also in this phase:
 - 📋 `driver.serverVersion()` + UI warning when master and slave **major versions differ** (⚠️ same engine ≠ same version; replayed DDL can fail or change behaviour)
 - 📋 `docker-compose` with every engine and a copy-and-compare smoke test per driver (there are no tests today)
 - 📋 Per-engine label set in `objects.js` (needed later for collections / keyspaces)
 
-### 📋 Phase 2 – PostgreSQL + SQLite
-- 📋 **PostgreSQL** (`pg`): DDL rebuilt from `pg_catalog` (no `pg_dump` dependency); FK relax via `session_replication_role=replica` (needs superuser, fall back to warning); checksum via `md5(string_agg(...))`
+### 🚧 Phase 2 – PostgreSQL ✅ + SQLite 📋
+- ✅ **PostgreSQL** (`pg`): see *Achieved so far*. DDL rebuilt from `pg_catalog` (no `pg_dump` dependency); FK relax via `session_replication_role=replica` (needs superuser, silently skipped otherwise)
 - 📋 **SQLite** (`better-sqlite3`): DDL from `sqlite_master.sql`; single connection so concurrency forced to 1; `PRAGMA foreign_keys`; row hash computed in JS; config is a file path (no host/user)
 
 ### 📋 Phase 3 – SQL Server + Oracle
@@ -175,5 +188,5 @@ Not SQL-shaped (no DDL, `INSERT`, PK ranges or `.sql` dumps), so they get a sepa
 
 ## ❓ Open decisions
 - 📌 Clone fast paths (Phase 5): default-on when detected, or opt-in? **Recommendation: opt-in.**
-- 📌 PostgreSQL DDL: catalog reconstruction (self-contained) vs `pg_dump` (higher fidelity, external binary). **Recommendation: catalog reconstruction.**
+- ✅ PostgreSQL DDL: catalog reconstruction (self-contained) chosen over `pg_dump` (higher fidelity, external binary). Revisit only if the "not copied" list above becomes a problem.
 - 📌 Native-addon engines (`better-sqlite3`, `ibm_db`): ship as optional dependencies so a failed build doesn't break `npm install`.

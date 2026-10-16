@@ -51,7 +51,9 @@ async function runOnce(app, log, { onProgress, onItem } = {}) {
   const { items, unmatched } = await app.tablesMatching(sched.tables.map((t) => t.pattern));
   for (const p of unmatched) log('WARN', `schedule.tables "${p}" matches no table on the master (or it is ignored)`);
   out.missing = unmatched;
-  log('INFO', `run started · ${items.length} table(s)${sched.atomicSwap ? ' · atomic swap' : ''}${sched.skipIfUnchanged ? ' · skip unchanged' : ''}`);
+  const swapUnsupported = sched.atomicSwap && app.driver.supportsSwap === false;
+  if (swapUnsupported) log('WARN', `atomicSwap is not supported on ${app.driver.name}: tables are dropped and recreated instead`);
+  log('INFO', `run started · ${items.length} table(s)${sched.atomicSwap && !swapUnsupported ? ' · atomic swap' : ''}${sched.skipIfUnchanged ? ' · skip unchanged' : ''}`);
 
   for (const item of items) item.prevStatus = item.status;
   for (const item of items) {
