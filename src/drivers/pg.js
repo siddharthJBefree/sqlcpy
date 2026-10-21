@@ -571,6 +571,14 @@ const maskProblem = createMaskProblem({ stringTypes: STRING_TYPES, textTypes: TE
 
 /** SQL expression that stands in for a sensitive column in the SELECT, so the real value never leaves the master. */
 function maskExpr(col, mode, salt) {
+  if (mode && typeof mode === 'object' && mode.when) {
+    const { when, ...rest } = mode;
+    const list = when.values.map((v) => escape(v)).join(', ');
+    return `CASE WHEN ${quote(when.column)} IN (${list}) THEN ${maskExpr(col, rest, salt)} ELSE ${quote(col.name)} END`;
+  }
+  if (mode && typeof mode === 'object' && Array.isArray(mode.replace)) {
+    return mode.replace.reduce((expr, [a, b]) => `REPLACE(${expr}, ${lit(a)}, ${lit(b)})`, `${quote(col.name)}::text`);
+  }
   if (mode && typeof mode === 'object' && Object.prototype.hasOwnProperty.call(mode, 'value')) return escape(mode.value);
   if (mode && typeof mode === 'object' && typeof mode.from === 'string') return quote(mode.from);
   if (mode && typeof mode === 'object' && Array.isArray(mode.concat)) {

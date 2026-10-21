@@ -23,6 +23,12 @@
     //       { "concat": [{ "column": "first_name" }, "@123", { "column": "last_name" }], "maxLength": 100 }
     //                  -> "maxLength" is optional: the joined text is trimmed to that many characters
     //                  -> join text columns and static text (not raw SQL)
+    //       { "replace": [["a","e"], ["e","s"]] }
+    //                  -> text replacements applied in order to the column's own value (NULL stays NULL).
+    //                     Each replacement must not be longer than the text it replaces (column length limit).
+    //     Any object form accepts "when": { "column": [values...] } – only rows where that column is one of the
+    //     values are replaced, the rest keep their real value. e.g.
+    //       "ticket_type": { "update_email": { "value": "qa@example.com", "when": { "id": [5, 16] } } }
     // Primary-key and range columns cannot be masked – use "tables" for those.
     "columns": {
       "users": {

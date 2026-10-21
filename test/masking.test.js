@@ -63,7 +63,7 @@ test('exposes configured ranges as range scope', () => {
 test('rejects malformed replacement rules', () => {
   assert.throws(
     () => new Rules({ sensitive: { columns: { users: { email: { value: 'x', from: 'name' } } } } }),
-    /give exactly one of "value", "from", or "concat"/,
+    /give exactly one of "value", "from", "concat", or "replace"/,
   );
   assert.throws(
     () => new Rules({ sensitive: { columns: { users: { email: { value: { unsafe: true } } } } } }),
@@ -73,6 +73,25 @@ test('rejects malformed replacement rules', () => {
     () => new Rules({ sensitive: { columns: { users: { email: { concat: [{ column: 'first_name' }, 42] } } } } }),
     /must be text or \{ "column": "name" \}/,
   );
+});
+
+test('parses replace chains and when conditions, rejects bad ones', () => {
+  const rules = new Rules({
+    sensitive: {
+      columns: {
+        t: {
+          a: { replace: [['a', 'e'], ['e', 's']] },
+          b: { value: 'x@y.z', when: { id: [5, 16] } },
+        },
+      },
+    },
+  });
+  assert.deepEqual({ ...rules.tableRule('t').masks }, {
+    a: { replace: [['a', 'e'], ['e', 's']] },
+    b: { value: 'x@y.z', when: { column: 'id', values: [5, 16] } },
+  });
+  assert.throws(() => new Rules({ sensitive: { columns: { t: { a: { replace: [] } } } } }), /replace: must be a non-empty list/);
+  assert.throws(() => new Rules({ sensitive: { columns: { t: { a: { value: 1, when: { id: [] } } } } } }), /when: must be/);
 });
 
 test('builds escaped custom, derived, and random expressions for the master SELECT', async () => {

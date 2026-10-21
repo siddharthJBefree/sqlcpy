@@ -158,11 +158,23 @@ class Rules {
               problems.push(`sensitive.columns.${table}.${col}: use one of ${MASK_MODES.join(', ')}, { "value": ... }, { "from": "other_column" }, or { "concat": [...] }`);
               continue;
             }
-            const keys = Object.keys(mask).filter((k) => k !== 'maxLength');
-            if (keys.length !== 1 || !['value', 'from', 'concat'].includes(keys[0])) {
-              problems.push(`sensitive.columns.${table}.${col}: give exactly one of "value", "from", or "concat"`);
+            const keys = Object.keys(mask).filter((k) => k !== 'maxLength' && k !== 'when');
+            if (keys.length !== 1 || !['value', 'from', 'concat', 'replace'].includes(keys[0])) {
+              problems.push(`sensitive.columns.${table}.${col}: give exactly one of "value", "from", "concat", or "replace" (plus optional "when")`);
               continue;
             }
+            let when;
+            if (mask.when !== undefined) {
+              const w = mask.when;
+              const wk = isObject(w) ? Object.keys(w) : [];
+              if (wk.length !== 1 || !Array.isArray(w[wk[0]]) || !w[wk[0]].length
+                  || w[wk[0]].some((v) => !(typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v))))) {
+                problems.push(`sensitive.columns.${table}.${col}.when: must be { "column": [value, ...] } with a non-empty list of strings / numbers`);
+                continue;
+              }
+              when = { column: wk[0], values: w[wk[0]] };
+            }
+            const finish = (m) => { normalized[col] = when ? { ...m, when } : m; };
             if (mask.maxLength !== undefined && keys[0] !== 'concat') {
               problems.push(`sensitive.columns.${table}.${col}.maxLength: only applies to "concat"`);
               continue;
@@ -172,7 +184,15 @@ class Rules {
                 problems.push(`sensitive.columns.${table}.${col}.from: must be a column name`);
                 continue;
               }
-              normalized[col] = { from: mask.from };
+              finish({ from: mask.from });
+            } else if (keys[0] === 'replace') {
+              const pairs = mask.replace;
+              if (!Array.isArray(pairs) || !pairs.length
+                  || pairs.some((p) => !Array.isArray(p) || p.length !== 2 || typeof p[0] !== 'string' || !p[0] || typeof p[1] !== 'string')) {
+                problems.push(`sensitive.columns.${table}.${col}.replace: must be a non-empty list of [ "from", "to" ] text pairs, applied in order`);
+                continue;
+              }
+              finish({ replace: pairs.map(([a, b]) => [a, b]) });
             } else if (keys[0] === 'value') {
               const value = mask.value;
               if (value !== null && !['string', 'number', 'boolean'].includes(typeof value)) {
@@ -183,7 +203,7 @@ class Rules {
                 problems.push(`sensitive.columns.${table}.${col}.value: must be a finite number`);
                 continue;
               }
-              normalized[col] = { value };
+              finish({ value });
             } else {
               if (!Array.isArray(mask.concat) || mask.concat.length < 2) {
                 problems.push(`sensitive.columns.${table}.${col}.concat: must be a list of at least two text or { "column": "name" } parts`);
@@ -206,7 +226,7 @@ class Rules {
                   valid = false;
                 }
               }
-              if (valid) normalized[col] = mask.maxLength === undefined ? { concat: parts } : { concat: parts, maxLength: mask.maxLength };
+              if (valid) finish(mask.maxLength === undefined ? { concat: parts } : { concat: parts, maxLength: mask.maxLength });
             }
           }
           this.masks.push({ pattern: table, re: globToRegExp(table), columns: normalized });

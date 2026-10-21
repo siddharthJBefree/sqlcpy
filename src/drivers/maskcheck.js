@@ -16,6 +16,18 @@ function createMaskProblem({ stringTypes, textTypes, numberTypes, timeTypes }) {
 
   /** Why `mode` cannot be applied to `col` on this engine, or null if it can. */
   return function maskProblem(col, mode, columns) {
+    if (mode && typeof mode === 'object' && mode.when) {
+      const { when, ...rest } = mode;
+      if (!columns.get(when.column.toLowerCase())) return `"when" column "${when.column}" does not exist`;
+      return maskProblem(col, rest, columns);
+    }
+    if (mode && typeof mode === 'object' && Array.isArray(mode.replace)) {
+      if (!textTypes.has(col.type)) return `"replace" needs a text column (is ${col.type})`;
+      if (col.maxLen != null && mode.replace.some(([a, b]) => b.length > a.length)) {
+        return `"replace" could lengthen the text beyond the column limit of ${col.maxLen} – use replacements no longer than the text they replace`;
+      }
+      return null;
+    }
     if (mode && typeof mode === 'object' && Object.prototype.hasOwnProperty.call(mode, 'value')) {
       const value = mode.value;
       if (value === null) return col.nullable ? null : 'is NOT NULL, so a null custom value would fail the insert';
